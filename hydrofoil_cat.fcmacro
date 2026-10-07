@@ -1,0 +1,391 @@
+import FreeCAD as App
+import Part
+import math
+
+# Инициализация документа
+doc = App.newDocument("Hydrofoil_Perfect_Assembly_Final_Fixed")
+
+# === 1. ГЕНЕРАЦИЯ ГЛАДКОГО ПРОФИЛЯ NACA 4410 (Хорда 260 мм, Толщина 25 мм) ===
+chord = 260.0
+thickness = 25.0
+max_thickness_ratio = thickness / chord
+
+m = 0.04  # Максимальная вогнутость
+p = 0.04  # Положение максимальной вогнутости
+
+num_points = 41
+x_points = [0.5 * (1.0 - math.cos(math.pi * i / (num_points - 1))) for i in range(num_points)]
+
+upper_pts = []
+lower_pts = []
+
+for x in x_points:
+    yt = 5 * max_thickness_ratio * (0.2969 * math.sqrt(x) - 0.1260 * x - 0.3516 * x**2 + 0.2843 * x**3 - 0.1015 * x**4) * chord
+    if x <= p:
+        yc = (m / (p**2)) * (2 * p * x - x**2) * chord
+        dyc_dx = (2 * m / (p**2)) * (p - x)
+    else:
+        yc = (m / ((1 - p)**2)) * ((1 - 2 * p) + 2 * p * x - x**2) * chord
+        dyc_dx = (2 * m / ((1 - p)**2)) * (p - x)
+        
+    theta = math.atan(dyc_dx)
+    # ИСПРАВЛЕНО: Разворачиваем профиль носком вперед (+X)
+    xu = x * chord - yt * math.sin(theta)
+    yu = yc + yt * math.cos(theta)
+    xl = x * chord + yt * math.sin(theta)
+    yl = yc - yt * math.cos(theta)
+    
+    upper_pts.append(App.Vector(xu, yu, 0))
+    lower_pts.append(App.Vector(xl, yl, 0))
+
+# Сборка замкнутого контура профиля
+profile_points = upper_pts[::-1] + lower_pts[1:]
+profile_points.append(profile_points)
+
+profile_wire = Part.makePolygon(profile_points)
+profile_face = Part.Face(profile_wire)
+
+# === 2. ПОСТРОЕНИЕ АСИММЕТРИЧНЫХ КРЫЛЬЕВ (Сдвиг педалей на +10 и -10 см) ===
+gap = 2.0  
+l_center = 1150.0
+l_left = 670.0   
+l_right = 470.0  
+
+z_left_joint = -475.0
+z_right_joint = 675.0
+
+# 2.1 Центральное крыло (1150 мм)
+center_foil = profile_face.extrude(App.Vector(0, 0, l_center))
+center_foil.translate(App.Vector(0, 0, z_left_joint))
+obj = doc.addObject("Part::Feature", "Foil_Center")
+obj.Shape = center_foil
+obj.ViewObject.ShapeColor = (0.2, 0.6, 0.9)
+
+# 2.2 Левое боковое крыло (670 мм)
+left_foil = profile_face.extrude(App.Vector(0, 0, l_left))
+left_foil.translate(App.Vector(0, 0, z_left_joint - gap - l_left))
+obj = doc.addObject("Part::Feature", "Foil_Left_Side")
+obj.Shape = left_foil
+obj.ViewObject.ShapeColor = (0.3, 0.7, 0.3)
+
+# 2.3 Правое боковое крыло (470 мм)
+right_foil = profile_face.extrude(App.Vector(0, 0, l_right))
+right_foil.translate(App.Vector(0, 0, z_right_joint + gap))
+obj = doc.addObject("Part::Feature", "Foil_Right_Side")
+obj.Shape = right_foil
+obj.ViewObject.ShapeColor = (0.7, 0.3, 0.3)
+
+
+# === 3. ПОСТРОЕНИЕ 6 ВЕРТИКАЛЬНЫХ ТЕКСТОЛИТОВЫХ СТОЕК (5 мм × 120 мм) ===
+strut_thick = 5.0
+strut_width = 120.0
+strut_height = 550.0  
+strut_drop = 20.0  # Выступ стойки вниз под крыло
+strut_up = 150
+strut_back = 150
+
+# Шаблон стандартной вертикальной (уже нет. тоже наклон, но на меньший угол и в другую сторону) стойки (для боковых крыльев)
+base_strut_vertical = Part.makeBox(strut_width, strut_height + strut_drop + strut_up, strut_thick)
+base_strut_vertical.translate(App.Vector(strut_back - strut_width, -strut_drop, -strut_thick/2)) 
+
+# Точка вращения - стык с осью крыла (X=65, Y=0)
+rot_axis_point = App.Vector(strut_back - strut_width/2, 0, 0)
+base_strut_vertical.rotate(rot_axis_point, App.Vector(0,0,1), -5.0) # -30 наклоняет верх назад (-X)
+
+# Шаблон НАКЛОННОЙ стойки (для центрального крыла)
+# Строим её локально, а затем поворачиваем на 30 градусов вокруг оси Z
+base_strut_inclined = Part.makeBox(strut_width, strut_height + strut_drop + 1.5*strut_up, strut_thick)
+base_strut_inclined.translate(App.Vector(strut_back - strut_width, -strut_drop, -strut_thick/2)) 
+# rot_axis_point = App.Vector(65.0 - strut_width/2, 0, 0)
+base_strut_inclined.rotate(rot_axis_point, App.Vector(0,0,1), 28.0) # -30 наклоняет верх вперед (+X)
+
+
+# ИСПРАВЛЕНО: Координаты Z пересчитаны строго ЗАПОДЛИЦО с торцами секций крыльев
+# С учетом толщины стойки (5 мм), чтобы наружная грань совпадала со срезом алюминия
+z_positions = [
+    z_left_joint - gap - l_left + strut_thick/2,                  # Стойка 1: Левый торец левого крыла
+    z_left_joint - gap - strut_thick/2,             # Стойка 2: Правый торец левого крыла (в Паре 1)
+    z_left_joint + strut_thick/2,                                 # Стойка 3: Левый торец центрального крыла (в Паре 1)
+    z_right_joint - strut_thick/2,                  # Стойка 4: Правый торец центрального крыла (в Паре 2)
+    z_right_joint + gap + strut_thick/2,                          # Стойка 5: Левый торец правого крыла (в Паре 2)
+    z_right_joint + gap + l_right - strut_thick/2   # Стойка 6: Правый торец правого крыла
+]
+
+for i, z_pos in enumerate(z_positions):
+    z_offset = 0.0
+    # Делаем микроскопический технологический зазор в парах скольжения для корректной визуализации
+    if i == 1: z_offset = -0.2  
+    if i == 4: z_offset = 0.2  
+
+    # Стойки 3 и 4 (индексы 2 и 3) делаем наклонными, остальные - вертикальными
+    if i == 2 or i == 3:
+        strut_shape = base_strut_inclined.copy()
+    else:
+        strut_shape = base_strut_vertical.copy()
+    
+    strut_shape.translate(App.Vector(0, 0, z_pos + z_offset))
+    obj = doc.addObject("Part::Feature", f"Strut_{i+1}")
+    obj.Shape = strut_shape
+    if i == 2 or i == 3:
+        obj.ViewObject.ShapeColor = (0.9, 0.4, 0.1) # Оранжевый цвет для наклонных стоек
+    else:
+        obj.ViewObject.ShapeColor = (0.8, 0.7, 0.2) # Желтый для вертикальных
+
+# === 4. ПОСТРОЕНИЕ ГОРИЗОНТАЛЬНЫХ ПОПЛАВКОВ (НОСОМ ВПЕРЕД) И БЕГОВЫХ ЛЫЖ ===
+hull_r = 60.0
+hull_len = 4000.0
+ski_thick = 15.0
+ski_width = 50.0
+ski_len = 2000.0
+
+# ИСПРАВЛЕНО: Разворачиваем конус носа ВПЕРЕД (положительное направление +X)
+hull_cyl = Part.makeCylinder(hull_r, hull_len - 600.0, App.Vector(0,0,0), App.Vector(1,0,0))
+hull_cone = Part.makeCone(0.0, hull_r, 600.0, App.Vector(0,0,0), App.Vector(1,0,0))
+# Носовой конус приваривается спереди (на отметке 0), а цилиндр уходит назад
+hull_cyl.translate(App.Vector(600.0, 0, 0))
+single_hull = hull_cyl.fuse(hull_cone)
+
+# Центрируем 4-метровый поплавок продольно: нос впереди на +2000 мм, корма сзади на -2000 мм
+single_hull.translate(App.Vector(-hull_len*2/3 , strut_height, 0))
+
+# Шаблон беговой лыжи (лежит поверх баллона)
+single_ski = Part.makeBox(ski_len, ski_thick, ski_width)
+single_ski.translate(App.Vector(-ski_len/2, strut_height + hull_r, -ski_width/2))
+
+# ПРАВЫЙ БОРТ (Поплавок строго по центру правого крыла)
+z_right_center = z_right_joint + gap + l_right/2
+right_hull = single_hull.copy().translate(App.Vector(0, 0, z_right_center))
+right_ski = single_ski.copy().translate(App.Vector(0, 0, z_right_center))
+
+obj = doc.addObject("Part::Feature", "Hull_Right")
+obj.Shape = right_hull
+obj.ViewObject.ShapeColor = (0.5, 0.5, 0.5)
+obj.ViewObject.Transparency = 70
+
+obj = doc.addObject("Part::Feature", "Ski_Right_Frame")
+obj.Shape = right_ski
+obj.ViewObject.ShapeColor = (0.1, 0.1, 0.1)
+
+# ЛЕВЫЙ БОРТ (Поплавок строго по центру левого крыла)
+z_left_center = -z_right_center                 # z_left_joint - gap - l_left/2
+left_hull = single_hull.copy().translate(App.Vector(0, 0, z_left_center))
+left_ski = single_ski.copy().translate(App.Vector(0, 0, z_left_center))
+
+obj = doc.addObject("Part::Feature", "Hull_Left")
+obj.Shape = left_hull
+obj.ViewObject.ShapeColor = (0.5, 0.5, 0.5)
+obj.ViewObject.Transparency = 70
+
+obj = doc.addObject("Part::Feature", "Ski_Left_Frame")
+obj.Shape = left_ski
+obj.ViewObject.ShapeColor = (0.1, 0.1, 0.1)
+
+
+
+# === 1. ГЕОМЕТРИЧЕСКИЕ ПАРАМЕТРЫ (Согласованные в пространстве) ===
+tube_d = 40.0       # Диаметр несущей трубы моста катамарана
+tube_len = 2300.0   # Длина трубы
+rear_x = 150.0
+rear_y = 650.0
+front_tube_len = 2000.0
+front_x = -250.0
+front_y = 650.0
+
+axis_x = -2000.0
+axis_y = 650.0
+lug_w = 30.0        # Ширина шарнирного уха для соснового бруска (под 30 мм)
+lug_d = 70.0        # Внешний диаметр уха шарнира
+goose_w = 40.0      # Ширина центрального шарнира "гуся" Акваскиппера
+
+# === 2. ПОСТРОЕНИЕ ГЛАВНОЙ НЕСУЩЕЙ ТРУБЫ МОСТА (40х2 мм) ===
+# Она смещена чуть вперед от оси качания рычагов на 60 мм, чтобы не мешать махам
+bridge_tube = Part.makeCylinder(tube_d/2, tube_len, App.Vector(0,0,0), App.Vector(0,0,1))
+# Внутренний вырез (стенка 2 мм)
+bridge_hollow = Part.makeCylinder(tube_d/2 - 2.0, tube_len, App.Vector(0,0,0), App.Vector(0,0,1))
+bridge_shape = bridge_tube.cut(bridge_hollow)
+
+bridge_shape.translate(App.Vector(axis_x, axis_y, -tube_len/2))
+
+obj = doc.addObject("Part::Feature", "Main_Bridge_Tube_40mm")
+obj.Shape = bridge_shape
+obj.ViewObject.ShapeColor = (0.6, 0.6, 0.6)
+
+# === труба заднего пилона (левая педаль) ===
+rear_tube = Part.makeCylinder(tube_d/2, tube_len, App.Vector(0,0,0), App.Vector(0,0,1))
+rear_hollow = Part.makeCylinder(tube_d/2 - 2.0, tube_len, App.Vector(0,0,0), App.Vector(0,0,1))
+rear_shape = rear_tube.cut(rear_hollow)
+
+rear_shape.translate(App.Vector(rear_x, rear_y, -tube_len/2))
+
+obj = doc.addObject("Part::Feature", "Rear_Bridge_Tube_40mm")
+obj.Shape = rear_shape
+obj.ViewObject.ShapeColor = (0.6, 0.6, 0.6)
+
+# === труба переднего пилона (правая педаль) ===
+front_tube = Part.makeCylinder(tube_d/2, front_tube_len, App.Vector(0,0,0), App.Vector(0,0,1))
+front_hollow = Part.makeCylinder(tube_d/2 - 2.0, front_tube_len, App.Vector(0,0,0), App.Vector(0,0,1))
+front_shape = front_tube.cut(front_hollow)
+
+front_shape.translate(App.Vector(front_x, front_y, -front_tube_len/2))
+
+obj = doc.addObject("Part::Feature", "Front_Bridge_Tube_40mm")
+obj.Shape = front_shape
+obj.ViewObject.ShapeColor = (0.6, 0.6, 0.6)
+
+# === 4. ПОСТРОЕНИЕ ШАРНИРНЫХ УШЕЙ (Крепления рычагов и гуся) ===
+# Базовый шаблон шарнирного уха: цилиндр с отверстием 14 мм + пластина перехода к бруску
+cyl_out = Part.makeCylinder(lug_d/2, lug_w, App.Vector(0,0,0), App.Vector(0,0,1))
+cyl_in = Part.makeCylinder(tube_d/2, lug_w, App.Vector(0,0,0), App.Vector(0,0,1))
+hinge_ring = cyl_out.cut(cyl_in)
+
+# Переходной хвост под сосновый брусок (40х30 мм)
+tail = Part.makeBox(80.0, 40.0, lug_w)
+tail.translate(App.Vector(0, -20.0, 0))
+base_lug = hinge_ring.fuse(tail)
+base_lug.translate(App.Vector(0, 0, -lug_w/2)) # Центровка по толщине
+
+# Шаблон для "гуся" по центру
+goose_out = Part.makeCylinder(lug_d/2, goose_w, App.Vector(0,0,0), App.Vector(0,0,1))
+goose_in = Part.makeCylinder(tube_d/2, goose_w, App.Vector(0,0,0), App.Vector(0,0,1))
+goose_hinge = goose_out.cut(goose_in)
+goose_hinge.translate(App.Vector(axis_x, axis_y, -goose_w/2))
+
+
+
+
+
+# === 5. ДОБАВЛЕНИЕ РЫЧАГОВ И РУЛЕВОЙ СТОЙКИ (ПРОДОЛЖЕНИЕ ВАШЕГО СКРИПТА) ===
+lever_w = 30.0   # Ширина прямоугольного рычага
+lever_h = 40.0   # Высота прямоугольного рычага
+
+# Расчет точных конечных координат X для рычагов с учетом тригонометрии ваших наклонов
+# Полная высота стоек от оси крыла до верха:
+h_vert_total = strut_height + strut_drop + strut_up
+h_incl_total = strut_height + strut_drop + 1.5 * strut_up
+
+# Смещение вершин стоек по X из-за углов поворота вокруг rot_axis_point (X = strut_back = 150)
+# x_offset_vert = (h_vert_total - strut_drop) * math.sin(math.radians(-5.0))  # Желтые стойки (-5 град)
+# x_offset_incl = (h_incl_total - strut_drop) * math.sin(math.radians(28.0))  # Оранжевые стойки (28 град)
+
+x_end_outer = rear_x   # Конечная точка X для внешних рычагов
+x_end_inner = front_x  # Конечная точка X для внутренних рычагов
+
+# Высота (Y) вершин стоек в пространстве FreeCAD после поворота
+y_end_outer = rear_y    #(h_vert_total - strut_drop) * math.cos(math.radians(-5.0))
+y_end_incl = front_y    # (h_incl_total - strut_drop) * math.cos(math.radians(28.0))
+
+# Координаты Z для четырех рычагов по осям ваших стоек z_positions
+# Смещаем на половину толщины уха (lug_w = 30), чтобы они шли ровно по стойкам
+z_levers = [
+    z_positions[0],  # Левый внешний (к Стойке 1)
+    z_positions[2],  # Левый внутренний (к Стойке 3)
+    z_positions[3],  # Правый внутренний (к Стойке 4)
+    z_positions[5]   # Правый внешний (к Стойке 6)
+]
+
+# 5.1 Отрисовка четырех продольных рычагов от носовой трубы (axis_x = -2000)
+for i, z_pos in enumerate(z_levers):
+    if i == 0 or i == 4 or i == 3:  # Внешние рычаги (Левая нога / Боковые крылья)
+        len_x = abs(x_end_outer - axis_x)
+        lever = Part.makeBox(len_x, lever_h, lever_w)
+        # Позиционируем от носа назад, центрируем по Z оси стойки
+        lever.translate(App.Vector(axis_x, y_end_outer - lever_h/2, z_pos - lever_w/2))
+        color = (0.3, 0.7, 0.3)  # Зеленый цвет для боковой системы
+        name = f"Lever_Outer_{'Left' if i==0 else 'Right'}"
+    else:  # Внутренние рычаги (Правая нога / Центральное крыло)
+        len_x = abs(x_end_inner - axis_x)
+        lever = Part.makeBox(len_x, lever_h, lever_w)
+        # Ставим на расчетную высоту наклонных оранжевых стоек
+        lever.translate(App.Vector(axis_x, y_end_incl - lever_h/2, z_pos - lever_w/2))
+        color = (0.2, 0.6, 0.9)  # Синий цвет для центральной системы
+        name = f"Lever_Inner_{'Left' if i==1 else 'Right'}"
+        
+    obj = doc.addObject("Part::Feature", name)
+    obj.Shape = lever
+    obj.ViewObject.ShapeColor = color
+    obj.ViewObject.Transparency = 30  # Прозрачность для контроля нахлестов
+
+# 5.2 Рулевая стойка-самокат (Неподвижная, на передней осевой трубе Main_Bridge_Tube)
+# Высота руля 1000 мм от уровня беговых лыж (strut_height + hull_r)
+h_ski_level = axis_y
+handlebar_h = 1000.0
+
+# наклонный вынос руля (на X = front_x = -250)
+stem = Part.makeCylinder(15.0, (handlebar_h**2+1750**2)**(1/2), App.Vector(axis_x, axis_y, 0), App.Vector(1750.0, 1000.0, 0.0))
+# Т-образная перекладина руля (ширина 500 мм вдоль оси Z)
+bar = Part.makeCylinder(11.0, 500.0, App.Vector(front_x, axis_y + handlebar_h, -250.0), App.Vector(0, 0, 1))
+handlebar = stem.fuse(bar)
+
+obj = doc.addObject("Part::Feature", "Steering_Handlebar_Assembly")
+obj.Shape = handlebar
+obj.ViewObject.ShapeColor = (0.1, 0.1, 0.1)
+
+
+# === 5.3 РАССТАНОВКА ШАРНИРОВ ПО ОСИ Z ===
+# 0.0 - строго центр аппарата (здесь стоит гусь)
+# Шаг педалей (межпедальное расстояние) = 200 мм (оси ног на -100 и +100 мм)
+# Рычаги идут парами (левый и правый борт для каждой ноги)
+
+# Центр "гуся" Акваскиппера
+obj = doc.addObject("Part::Feature", "Hinge_Goose_Center")
+obj.Shape = goose_hinge
+obj.ViewObject.ShapeColor = (0.1, 0.5, 0.1)
+
+# Координаты Z для четырех рычагов:
+# Левая нога (Боковые крылья): рычаги разнесены шире, по краям беговых дорожек
+# Правая нога (Центральное крыло): рычаги идут ближе к центру
+z_lugs = [
+    z_positions[0],  # Левый рычаг БОКОВЫХ крыльев (Левая нога, внешняя граница)
+    z_positions[2],   # Левый рычаг ЦЕНТРАЛЬНОГО крыла (Правая нога, внутренняя граница)
+    z_positions[3],   # Правый рычаг ЦЕНТРАЛЬНОГО крыла (Правая нога, внутренняя граница)
+    z_positions[5]   # Правый рычаг БОКОВЫХ крыльев (Левая нога, внешняя граница)
+]
+
+labels = [
+    "Hinge_Left_Side_Foil_Outer",
+    "Hinge_Right_Center_Foil_Inner",
+    "Hinge_Right_Center_Foil_Outer",
+    "Hinge_Left_Side_Foil_Inner"
+]
+
+colors = [
+    (0.3, 0.7, 0.3),  # Зеленый (Боковые)
+    (0.2, 0.6, 0.9),  # Синий (Центральное)
+    (0.2, 0.6, 0.9),  # Синий (Центральное)
+    (0.3, 0.7, 0.3)   # Зеленый (Боковые)
+]
+
+for i, z_pos in enumerate(z_lugs):
+    lug_shape = base_strut_copy = base_lug.copy()
+    
+    # Разворачиваем уши назад (вдоль оси X, куда пойдут сосновые бруски)
+#    lug_shape.rotate(App.Vector(0,0,0), App.Vector(0,0,1), 180)
+    lug_shape.translate(App.Vector(axis_x, axis_y, z_pos))
+    
+    obj = doc.addObject("Part::Feature", labels[i])
+    obj.Shape = lug_shape
+    obj.ViewObject.ShapeColor = colors[i]
+
+# === 6. ДОБАВЛЕНИЕ КОНСОЛЬНЫХ ПЕДАЛЕЙ ПРЯМО НА ТРУБЫ ===
+pedal_len, pedal_wid, pedal_h = 400.0, 150.0, 40.0
+base_pedal = Part.makeBox(pedal_len, pedal_h, pedal_wid)
+
+# Левая педаль на задней трубе (Z = -100)
+left_pedal = base_pedal.copy()
+left_pedal.translate(App.Vector(rear_x - pedal_len*5/6, rear_y, -100.0 - pedal_wid/2))
+obj_lp = doc.addObject("Part::Feature", "Pedal_Left_Rear_Tube")
+obj_lp.Shape = left_pedal
+obj_lp.ViewObject.ShapeColor = (0.1, 0.4, 0.1)
+obj_lp.ViewObject.Transparency = 10
+
+# Правая педаль на передней трубе (Z = +100)
+right_pedal = base_pedal.copy()
+right_pedal.translate(App.Vector(front_x - pedal_len/6, front_y, 100.0 - pedal_wid/2))
+obj_rp = doc.addObject("Part::Feature", "Pedal_Right_Front_Tube")
+obj_rp.Shape = right_pedal
+obj_rp.ViewObject.ShapeColor = (0.1, 0.2, 0.5)
+obj_rp.ViewObject.Transparency = 10
+
+
+doc.recompute()
+App.Console.PrintMessage("Носовой шарнирный узел успешно построен!\n")
